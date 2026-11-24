@@ -34,7 +34,7 @@ jobs:
       - name: Smoke test (open the DMG, start the app, API, stop, start again)
         run: bash scripts/test-mac-app.sh release-build/mac/Zephion-Billkaro-Mac.dmg
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Zephion-Billkaro-Mac
           path: release-build/mac/Zephion-Billkaro-Mac.dmg
