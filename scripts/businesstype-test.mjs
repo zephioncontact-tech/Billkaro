@@ -1,0 +1,156 @@
+// v1.10.83 - business type → features, and the sidebar order.
+//
+// Run: `node scripts/businesstype-test.mjs`
+
+import {
+  BUSINESS_TYPES, SWITCHABLE_MODULES, modulesForType, applyBusinessType,
+  businessTypeChanges, featureChanges, orderedMenu, moveMenuItem, wizardResult,
+  printStyleForType,
+} from '../src/utils/businessTypes.js';
+import { STANDARD_TERMS, QUICK_TERMS, termsForType, defaultTermsFor } from '../src/utils/termsDefaults.js';
+import { isModuleEnabled, MENU_ITEMS, FEATURE_GROUPS, gstinFill } from '../src/utils.js';
+import { BUSINESS_PRESETS } from '../src/utils/printSettings.js';
+
+let passed = 0, failed = 0;
+function eq(actual, expected, label) {
+  if (JSON.stringify(actual) === JSON.stringify(expected)) { passed++; console.log(`  ok ${label}`); }
+  else { failed++; console.log(`  FAIL ${label}\n     expected: ${JSON.stringify(expected)}\n     actual:   ${JSON.stringify(actual)}`); }
+}
+const onIn = (type) => Object.entries(modulesForType(type)).filter(([, v]) => v).map(([k]) => k).sort();
+const shown = (type, id) => isModuleEnabled(id, applyBusinessType(type, {}));
+
+console.log('Every type is complete and known');
+for (const t of BUSINESS_TYPES) {
+  eq(Object.keys(modulesForType(t.id)).sort(), [...SWITCHABLE_MODULES].sort(), `${t.id}: decides every switch`);
+  if (t.id !== 'everything') eq(!!BUSINESS_PRESETS[t.id], true, `${t.id}: matches an invoice-style preset`);
+}
+eq(modulesForType('nope'), null, 'unknown type gives nothing');
+eq(applyBusinessType('nope', { reports: false }), { reports: false }, 'unknown type changes nothing');
+
+for (const t of BUSINESS_TYPES) eq(shown(t.id, 'cashBook'), true, `${t.id}: cash book on (every business handles cash)`);
+
+console.log('Freelancer');
+for (const id of ['inventory', 'purchases', 'purchaseOrders', 'manufacturing']) eq(shown('freelancer', id), false, `freelancer: ${id} off`);
+for (const id of ['recurring', 'receipts', 'expenses', 'gstReturns', 'tdsTcs', 'incomeTax']) eq(shown('freelancer', id), true, `freelancer: ${id} on`);
+
+console.log('Wholesale and manufacturing');
+for (const id of ['purchases', 'purchaseOrders', 'inventory', 'ewayBill', 'gstr2b']) eq(shown('wholesale', id), true, `wholesale: ${id} on`);
+eq(shown('wholesale', 'manufacturing'), false, 'wholesale: manufacturing off');
+for (const id of ['manufacturing', 'purchaseOrders', 'costCentres', 'ewayBill']) eq(shown('manufacturer', id), true, `manufacturer: ${id} on`);
+
+console.log('Retail, restaurant, service');
+eq(shown('retail_shop', 'inventory') && shown('retail_shop', 'purchases'), true, 'retail: products and purchases on');
+eq(shown('retail_shop', 'manufacturing') || shown('retail_shop', 'purchaseOrders'), false, 'retail: no manufacturing, no purchase orders');
+eq(shown('restaurant', 'upiQr') && !shown('restaurant', 'recurring'), true, 'restaurant: UPI QR on, recurring off');
+// v1.10.85 (#137) - barcodes: shops that sell goods off a shelf.
+eq(['retail_shop', 'wholesale', 'manufacturer', 'everything'].map((t) => shown(t, 'barcodes')), [true, true, true, true], 'barcodes on: retail, wholesale, manufacturing, everything');
+eq(['freelancer', 'restaurant', 'service'].map((t) => shown(t, 'barcodes')), [false, false, false], 'barcodes off: freelancer, restaurant, service');
+eq(shown('service', 'recurring') && shown('service', 'inventory'), true, 'service: recurring and spare parts on');
+
+console.log('Everything');
+eq(onIn('everything'), [...SWITCHABLE_MODULES].sort(), 'everything: all on');
+eq(SWITCHABLE_MODULES.every(id => shown('everything', id)), true, 'everything: shown');
+
+console.log('Never off');
+const core = FEATURE_GROUPS.flatMap(g => g.modules).filter(m => m.core).map(m => m.id);
+eq(core.sort(), ['clients', 'dashboard', 'invoicing'], 'core: dashboard, new invoice, clients');
+for (const t of BUSINESS_TYPES) eq(core.every(id => shown(t.id, id)), true, `${t.id}: core stays on`);
+eq(core.every(id => isModuleEnabled(id, { dashboard: false, invoicing: false, clients: false })), true, 'core ignores a saved "off"');
+const always = MENU_ITEMS.filter(m => !m.module).map(m => m.id).sort();
+eq(always, ['settings', 'support'], 'Settings and Support & About have no switch');
+eq(SWITCHABLE_MODULES.some(id => ['settings', 'support'].includes(id)), false, 'no type can hide Settings or Support');
+for (const t of BUSINESS_TYPES) eq(['guide', 'notifications', 'offlineButton', 'phoneButton'].every(id => shown(t.id, id)), true, `${t.id}: app helpers stay on (incl. the Offline mode and phone buttons)`);
+
+console.log('Existing switches untouched until a type is applied');
+const mine = { reports: false, tdsTcs: true, futureThing: true };
+const before = JSON.stringify(mine);
+const changes = businessTypeChanges('freelancer', mine);
+eq(JSON.stringify(mine), before, 'asking what changes does not change the map');
+eq(changes.turnOn.includes('reports'), true, 'freelancer would turn Reports back on');
+eq(changes.turnOff.includes('inventory') && changes.turnOff.includes('purchases'), true, 'freelancer would turn off Products and Purchases');
+eq(changes.turnOn.includes('tdsTcs'), false, 'already-on TDS/TCS is not listed');
+const applied = applyBusinessType('freelancer', mine);
+eq(applied.futureThing, true, 'a key from a newer version is kept');
+eq(JSON.stringify(mine), before, 'applying returns a new map');
+eq(businessTypeChanges('freelancer', applied), { turnOn: [], turnOff: [] }, 'after applying, nothing left to change');
+
+console.log('Unsaved draft vs saved');
+eq(featureChanges({}, {}), { turnOn: [], turnOff: [] }, 'same switches: nothing to save');
+eq(featureChanges({}, { reports: true }), { turnOn: [], turnOff: [] }, 'ticking something already on by default is no change');
+eq(featureChanges({ reports: false }, {}), { turnOn: ['reports'], turnOff: [] }, 'back to default turns Reports on');
+eq(featureChanges({}, { recurring: false, einvoice: true }), { turnOn: ['einvoice'], turnOff: ['recurring'] }, 'on and off listed');
+eq(featureChanges({}, { dashboard: false }), { turnOn: [], turnOff: [] }, 'core items never count as a change');
+eq(featureChanges({}, applyBusinessType('freelancer', {})), businessTypeChanges('freelancer', {}), 'picking a type = the same changes');
+
+console.log('Sidebar order');
+const def = MENU_ITEMS.map(m => m.id);
+// v1.10.86 - saved orders now carry group markers; compare the items only.
+const flat = (order) => orderedMenu(order).map(m => m.id);
+eq(orderedMenu([]).map(m => m.id), def, 'no saved order = default');
+eq(flat(['ghost', 'reports', 'cashbook']).filter(id => id === 'reports' || id === 'cashbook'), ['reports', 'cashbook'], 'saved item order is kept (inside its group), unknown ids ignored');
+eq(orderedMenu(undefined).length, MENU_ITEMS.length, 'bad saved order is safe');
+let o = moveMenuItem([], 'reports', -1);
+const aboveReports = def[def.indexOf('reports') - 1];
+eq(o.indexOf('reports') < o.indexOf(aboveReports), true, `Reports moved above ${aboveReports}`);
+eq(flat(moveMenuItem(o, 'reports', +1)), def, 'moving back down restores');
+eq(flat(moveMenuItem([], 'dashboard', -1)), def, 'first item cannot go up');
+const idsIn = (section) => MENU_ITEMS.filter(m => m.section === section).map(m => m.id);
+eq(flat(moveMenuItem([], idsIn('main').at(-1), +1)), def, 'last of the top part cannot jump into the bottom part');
+eq(flat(moveMenuItem([], idsIn('bottom')[0], -1)), def, 'first of the bottom part cannot jump into the top part');
+eq(flat(moveMenuItem([], idsIn('top')[0], -1)), def, 'first top-bar button cannot jump into another part');
+eq(['guide', 'notifications', 'darkMode'].every(id => idsIn('top').includes(id)), true, 'dark mode, notifications and guide are top-bar buttons');
+eq(idsIn('top').includes('lock'), false, 'no second lock button in the top bar (v1.10.86: the Lock button on the Dashboard is the one)');
+o = moveMenuItem([], 'settings', -1);
+eq(o.indexOf('settings') < o.indexOf('support'), true, 'bottom items reorder among themselves');
+// v1.10.86 - the Control Panel moved into Settings: no switch, no menu item.
+eq(FEATURE_GROUPS.flatMap(g => g.modules).some(m => m.id === 'controlPanel') || MENU_ITEMS.some(m => m.id === 'controlpanel'), false, 'no Control Panel menu item or switch');
+eq(flat(moveMenuItem([], 'nope', 1)), def, 'unknown item: no change');
+
+console.log('[ERR-033] The wizard keeps the language and paper picked in it');
+for (const biz of ['retail_shop', 'freelancer', 'wholesale', 'service']) {
+  const r = wizardResult({ labelLanguage: 'en', paperSize: 'a4' }, { biz, language: 'hi', paperSize: '80mm' });
+  eq([r.printSettings.labelLanguage, r.printSettings.paperSize, r.invoiceDefaults.paperSize, r.printSettings.onboardingComplete],
+    ['hi', '80mm', '80mm', true], `${biz} + Hindi + 80mm: Hindi kept (the preset sets English), paper in the invoice defaults`);
+}
+eq(wizardResult({}, { biz: '', language: 'ta', paperSize: '' }).printSettings.labelLanguage, 'ta', 'no business type: the language still saves');
+eq('paperSize' in wizardResult({}, { biz: '', language: 'en', paperSize: '' }).invoiceDefaults, false, 'no paper picked: the invoice paper is left as it was');
+
+console.log('v1.10.86 Start with Cash Sale for counter sales');
+eq(['retail_shop', 'restaurant'].map((t) => shown(t, 'cashSaleDefault')), [true, true], 'retail and restaurant start with Cash Sale');
+eq(['freelancer', 'wholesale', 'manufacturer', 'service'].map((t) => shown(t, 'cashSaleDefault')), [false, false, false, false], 'other types do not');
+
+console.log('v1.10.86 The business type sets the print style');
+const ps = printStyleForType({ labelLanguage: 'hi', footerMessage: 'mine' }, 'retail_shop');
+eq([ps.activeBusinessPresetId, ps.labelLanguage, ps.pdfTemplate], ['retail_shop', 'hi', 'modern'], 'retail: its style, the Hindi labels kept');
+eq(printStyleForType({ a: 1 }, 'everything'), { a: 1 }, 'everything: print settings untouched');
+eq(wizardResult({ labelLanguage: 'ta' }, { biz: 'freelancer' }).printSettings.labelLanguage, 'ta', 'welcome without a language keeps the saved one');
+eq(wizardResult({}, { biz: 'service' }).printSettings.activeBusinessPresetId, 'service', 'welcome sets the print style of the type');
+
+console.log('v1.10.86 The starting terms follow the business type');
+const seeded = { id: 'default', name: 'Standard Terms', content: STANDARD_TERMS };
+const goods = QUICK_TERMS.find((q) => q.name.startsWith('Goods'));
+eq(defaultTermsFor([seeded], 'retail_shop'), { id: 'default', name: goods.name, content: goods.content }, 'kirana: the agency wording becomes the goods terms');
+eq(termsForType('freelancer').name, 'Freelancer (Simple)', 'freelancer: the freelancer terms');
+eq(termsForType('everything'), null, 'everything: no terms of its own');
+// v1.10.86 - a restaurant and a repair shop have their own terms.
+eq([termsForType('restaurant').name, termsForType('service').name], ['Restaurant / Cafe', 'Service / Repair Shop'], 'restaurant and repair shop: their own terms');
+eq(/No refund on food/.test(termsForType('restaurant').content) && /Warranty on repair work/.test(termsForType('service').content), true, '...with their own wording');
+for (const t of BUSINESS_TYPES) if (t.id !== 'everything') eq(!!termsForType(t.id), true, `${t.id}: has matching terms`);
+eq(defaultTermsFor([{ ...seeded, content: STANDARD_TERMS + ' Edited.' }], 'retail_shop'), null, 'edited terms are never replaced');
+eq(defaultTermsFor([{ ...seeded, name: 'My terms' }], 'retail_shop'), null, 'renamed terms are never replaced');
+eq(defaultTermsFor([{ id: 'tpl_1', name: 'Standard Terms', content: STANDARD_TERMS }], 'retail_shop'), null, 'only the seeded one (id default) is reworded');
+const once = defaultTermsFor([seeded], 'retail_shop');
+eq(defaultTermsFor([once], 'manufacturer').name, 'Manufacturing & Trading', 'still stock text: a new type rewords it again');
+eq(defaultTermsFor([once], 'wholesale'), null, 'same terms already: nothing to save');
+eq(defaultTermsFor([seeded, { id: 'tpl_2', name: goods.name, content: goods.content }], 'retail_shop'), null, 'already added from Quick Start: no second copy');
+eq(defaultTermsFor([], 'retail_shop'), null, 'no templates yet: nothing');
+
+console.log('v1.10.86 A GSTIN fills in the state and PAN, never over typed ones');
+eq(gstinFill({}, '29ABCDE1234F1ZW'), { state: 'Karnataka', pan: 'ABCDE1234F' }, 'empty fields filled');
+eq(gstinFill({ state: 'Kerala', pan: 'XYZAB1234C' }, '29ABCDE1234F1ZW'), {}, 'typed state and PAN kept');
+eq(gstinFill({}, '29abcde1234f1zw'), { state: 'Karnataka', pan: 'ABCDE1234F' }, 'lower case works');
+eq(gstinFill({}, '29ABCDE1234F1Z'), {}, 'not 15 characters yet: nothing');
+eq(gstinFill({}, '29ABCDE1234F1ZX'), {}, 'fails the checksum: nothing');
+
+console.log(`\n${passed} passed, ${failed} failed`);
+if (failed) process.exit(1);
